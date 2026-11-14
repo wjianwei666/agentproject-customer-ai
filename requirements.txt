@@ -1,0 +1,8 @@
+# 运行时依赖
+# 说明：Agent 核心链路只用标准库（urllib / re / math / json / collections），
+# 以下依赖仅用于 HTTP 服务层、配置解析与 PDF 生成。
+fastapi>=0.110.0
+uvicorn>=0.27.0
+pydantic>=2.6.0
+PyYAML>=6.0
+reportlab>=4.0

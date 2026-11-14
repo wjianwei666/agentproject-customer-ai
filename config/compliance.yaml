@@ -1,0 +1,53 @@
+version: "1.0"
+
+# level: block = 必须整改，整改失败则转人工；warn = 记录告警但不阻断
+# fix 字段用于兜底整改（离线模式替换命中词），保证无 LLM 时也能出合规文案
+rules:
+  - id: absolute_wording
+    name: 绝对化用语
+    level: block
+    patterns: [最好, 最强, 第一品牌, 全网最低, 史上最低, 100%, 绝对, 永久, 唯一, 顶级, 国家级]
+    fix: 较优
+    message: 广告法禁止绝对化用语，需改为可验证的相对表述
+
+  - id: over_promise_compensation
+    name: 超额赔付承诺
+    level: block
+    patterns: [假一赔十, 十倍赔偿, 无条件赔偿, 全额赔付, 包赔, 赔十倍]
+    fix: 按平台售后规则处理
+    message: 赔付承诺超出平台规则授权范围，需交由售后专员确认
+
+  - id: competitor_defamation
+    name: 贬低竞品
+    level: block
+    patterns: [别家都是假货, 其他家都是假的, 同行都坑人, 那家是骗子]
+    fix: 各家产品定位不同
+    message: 不得贬低竞争对手，属不正当竞争风险
+
+  - id: privacy_risk
+    name: 隐私与账号风险
+    level: block
+    patterns: [身份证号, 银行卡号, 密码, 验证码发我]
+    fix: 敏感信息
+    message: 禁止索取或输出用户隐私信息
+
+  - id: medical_claim
+    name: 功效违规宣称
+    level: block
+    patterns: [治疗, 治愈, 根治, 药效, 疗效]
+    fix: 改善体验
+    message: 非医疗类商品不得宣称医疗功效
+
+  - id: vague_timeline
+    name: 模糊时效表述
+    level: warn
+    patterns: [大概, 应该能到, 可能明天, 说不定]
+    fix: 预计
+    message: 时效表述需给出具体节点，避免模糊词
+
+  - id: over_discount
+    name: 超权限优惠
+    level: warn
+    patterns: [免单, 白送, 五折以下, 打三折, 打二折]
+    fix: 专属优惠
+    message: 优惠力度超出当前角色授权上限

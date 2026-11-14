@@ -1,0 +1,144 @@
+version: "1.0"
+
+# 标签人群匹配：对每个画像逐条比对规则，命中规则权重累加，
+# 取得分最高且 >= match_threshold 的画像；全部未命中则回落到 default_persona。
+match_threshold: 45
+default_persona: general_fallback
+
+personas:
+  - id: vip_loyal_high
+    name: 高价值忠诚VIP
+    description: 高客单、高频复购、高会员等级，重视被尊重与专属感，对价格不敏感
+    rules:
+      - {field: value_level, op: equals, value: high, weight: 40}
+      - {field: member_level, op: in, value: [V4, V5], weight: 30}
+      - {field: lifecycle, op: equals, value: active, weight: 20}
+      - {field: intent, op: in, value: [price_promo, product_consult], weight: 15}
+    strategy:
+      tone: 尊贵、克制、先结论后补充
+      address: 尊敬的{{member_level}}会员
+      focus:
+        - 第一句直接给结论，不铺垫
+        - 主动叠加专属权益，体现身份差异
+        - 大额诉求直接升级专属客服，不在线讨价还价
+      perks: [会员专属券包, 免运费特权, 专属客服通道]
+      taboos: [不要使用"亲""宝子"等泛化称呼, 不要引导其与竞品比价, 不要重复推销低价商品]
+      closing: 主动确认是否需要安排专属顾问继续跟进
+      max_discount: 0.15
+      escalate_after_turns: 2
+
+  - id: price_sensitive_new
+    name: 价格敏感新客
+    description: 首次或低频购买、渠道多为直播/搜索，决策核心是价格与性价比，流失风险高
+    rules:
+      - {field: lifecycle, op: equals, value: new, weight: 40}
+      - {field: price_sensitivity, op: equals, value: sensitive, weight: 35}
+      - {field: source, op: in, value: [live, search], weight: 20}
+      - {field: intent, op: in, value: [price_promo, product_consult], weight: 15}
+    strategy:
+      tone: 热情、直白、给确定性数字
+      address: 亲
+      focus:
+        - 先给明确价格区间，再给省钱路径
+        - 用"到手价 + 叠加规则"替代"打折"表述
+        - 强调低价不等于低质，给材质/售后保障
+      perks: [新人首单立减, 满减券包, 运费险]
+      taboos: [不要使用"全网最低""史上最低"等绝对化用语, 不要承诺超出权限的折扣, 不要贬低竞品]
+      closing: 给出下单入口，并提示券的有效期
+      max_discount: 0.10
+      escalate_after_turns: 3
+
+  - id: anxious_urgent
+    name: 焦虑催单型
+    description: 已下单未收货，情绪焦虑，核心诉求是确定性时间与可追踪的进度
+    rules:
+      - {field: emotion, op: equals, value: anxious, weight: 40}
+      - {field: intent, op: in, value: [logistics, order_query], weight: 35}
+      - {field: lifecycle, op: in, value: [active, new], weight: 10}
+    strategy:
+      tone: 稳定、安抚、先共情再给确定时间
+      address: 您
+      focus:
+        - 第一句先共情，第二句给具体节点时间
+        - 主动提供单号与查询路径，降低不确定性
+        - 异常件主动给补偿方案，不等用户开口
+      perks: [优先派送, 运费券, 延迟补偿]
+      taboos: [不要使用"应该""大概""可能"等模糊词, 不要归咎于物流方, 不要承诺精确到小时的送达]
+      closing: 给出主动跟进承诺并设置回访节点
+      max_discount: 0.05
+      escalate_after_turns: 2
+
+  - id: angry_complaint
+    name: 愤怒维权型
+    description: 已发生明确损失或服务事故，情绪激烈，存在升级投诉、差评、平台仲裁风险
+    rules:
+      - {field: emotion, op: equals, value: angry, weight: 45}
+      - {field: intent, op: in, value: [complaint, quality_issue, refund_return], weight: 35}
+      - {field: value_level, op: in, value: [high, medium], weight: 10}
+    strategy:
+      tone: 诚恳、低姿态、不辩解、只给方案
+      address: 您
+      focus:
+        - 第一句直接道歉，不解释原因
+        - 一次性给完整解决方案（退款/补发/补偿三选一）
+        - 明确责任人与处理时限，消除"没人管"的恐惧
+      perks: [全额退款, 免费补发, 补偿券]
+      taboos: [不要反问用户, 不要使用"按规定""公司要求"等推责表述, 不要承诺法定之外的赔偿倍数]
+      closing: 给出工单号与专属处理人，主动告知下一步时间
+      max_discount: 0.20
+      escalate_after_turns: 1
+
+  - id: rational_researcher
+    name: 理性比价研究型
+    description: 决策前深度调研，关注参数、材质、售后条款，偏好自助与文档化信息
+    rules:
+      - {field: price_sensitivity, op: in, value: [neutral, insensitive], weight: 30}
+      - {field: intent, op: equals, value: product_consult, weight: 35}
+      - {field: service_pref, op: equals, value: self_service, weight: 25}
+    strategy:
+      tone: 客观、结构化、给参数与依据
+      address: 您
+      focus:
+        - 用要点列表回答，先给对比维度再给结论
+        - 给可验证依据（材质、检测报告、售后条款原文）
+        - 不回避产品短板，主动说明适用边界
+      perks: [延长保修, 免费试用装]
+      taboos: [不要使用夸张形容, 不要回避缺点, 不要编造参数]
+      closing: 给出规格对比页与售后条款链接
+      max_discount: 0.05
+      escalate_after_turns: 4
+
+  - id: silent_recall
+    name: 沉默流失预警
+    description: 长时间未下单或已进入流失预警，需要低打扰唤醒，核心是权益钩子
+    rules:
+      - {field: lifecycle, op: in, value: [silent, churn_risk], weight: 45}
+      - {field: intent, op: in, value: [price_promo, product_consult, other], weight: 20}
+    strategy:
+      tone: 轻打扰、价值导向、不制造压力
+      address: 您
+      focus:
+        - 一条消息只给一个钩子，不叠加多个诉求
+        - 用"专享回归权益"替代"清仓打折"
+        - 提供低门槛回流动作（领券即走）
+      perks: [回归专享券, 老客价保]
+      taboos: [不要连续追问为什么不买, 不要制造焦虑, 不要群发式话术]
+      closing: 给一次性可领取权益，领取即结束对话
+      max_discount: 0.12
+      escalate_after_turns: 3
+
+  - id: general_fallback
+    name: 通用兜底人群
+    description: 标签缺失或无法归类时的默认画像，保证链路可用
+    rules: []
+    strategy:
+      tone: 中性、简洁、礼貌
+      address: 您
+      focus:
+        - 先回答用户明确问题，再补充一条相关信息
+        - 信息不足时主动反问一个关键问题
+      perks: [标准售后服务]
+      taboos: [不要使用绝对化用语, 不要承诺未确认的时效]
+      closing: 询问是否还需要其他帮助
+      max_discount: 0.05
+      escalate_after_turns: 3

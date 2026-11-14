@@ -1,0 +1,31 @@
+version: "1.0"
+
+app:
+  name: 电商智能客服 Agent
+  mode: local
+  log_level: INFO
+
+llm:
+  enabled: true
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4o-mini"
+  api_key_env: "OPENAI_API_KEY"
+  temperature: 0.3
+  timeout: 30
+  max_retries: 1
+
+retrieval:
+  top_k: 3
+  min_score: 0.15
+  bm25_k1: 1.2
+  bm25_b: 0.75
+
+guard:
+  # 意图置信度低于该值直接转人工
+  min_intent_confidence: 0.45
+  # 命中高危意图且知识库无答案时转人工
+  handoff_intents:
+    - complaint
+    - quality_issue
+  # 合规整改最多重试轮数，超过则转人工
+  compliance_max_retry: 2

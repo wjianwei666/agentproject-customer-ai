@@ -1,0 +1,139 @@
+version: "1.0"
+
+default_intent: other
+
+# 规则打分：命中一个关键词记 weight 分，命中数越多置信度越高。
+# 置信度 = min(0.95, 0.45 + 0.12 * score)
+confidence_base: 0.45
+confidence_step: 0.12
+confidence_cap: 0.95
+
+intents:
+  - id: product_consult
+    name: 售前商品咨询
+    weight: 1.0
+    keywords:
+      - 怎么选
+      - 哪个好
+      - 有什么区别
+      - 推荐
+      - 适合
+      - 材质
+      - 尺寸
+      - 参数
+      - 功能
+      - 效果
+      - 正品
+      - 保真
+      - 能用多久
+      - 好用吗
+
+  - id: price_promo
+    name: 价格与优惠
+    weight: 1.0
+    keywords:
+      - 优惠
+      - 便宜
+      - 打折
+      - 折扣
+      - 券
+      - 活动
+      - 满减
+      - 多少钱
+      - 价格
+      - 贵
+      - 降价
+      - 秒杀
+      - 拼团
+      - 到手价
+
+  - id: order_query
+    name: 订单查询
+    weight: 1.0
+    keywords:
+      - 订单
+      - 我的单
+      - 下单
+      - 付款
+      - 支付
+      - 扣款
+      - 查一下单
+      - 订单号
+
+  - id: logistics
+    name: 物流配送
+    weight: 1.0
+    keywords:
+      - 物流
+      - 快递
+      - 发货
+      - 到货
+      - 几天到
+      - 单号
+      - 顺丰
+      - 派送
+      - 签收
+      - 什么时候到
+      - 没收到
+
+  - id: refund_return
+    name: 退换货
+    weight: 1.0
+    keywords:
+      - 退货
+      - 退款
+      - 换货
+      - 退换
+      - 七天无理由
+      - 申请退
+      - 退回去
+      - 不想要了
+
+  - id: quality_issue
+    name: 商品质量问题
+    weight: 1.0
+    keywords:
+      - 质量
+      - 坏了
+      - 破损
+      - 漏发
+      - 错发
+      - 瑕疵
+      - 不能用
+      - 色差
+      - 假货
+      - 变形
+
+  - id: invoice
+    name: 发票开具
+    weight: 1.0
+    keywords:
+      - 发票
+      - 开票
+      - 抬头
+      - 税号
+      - 报销
+
+  - id: complaint
+    name: 投诉与维权
+    weight: 1.2
+    keywords:
+      - 投诉
+      - 差评
+      - 客服态度
+      - 骗子
+      - 消协
+      - "315"
+      - 举报
+      - 曝光
+      - 太失望
+
+  - id: other
+    name: 其他/闲聊
+    weight: 1.0
+    keywords:
+      - 你好
+      - 在吗
+      - 谢谢
+      - 人工
+      - 转人工

@@ -1,0 +1,1404 @@
+# =============================================================================
+# 电商智能客服 Agent｜Dify 工作流 DSL
+# =============================================================================
+# 用途：Dify 工作室 → 创建应用 → 导入 DSL 文件
+# 适配：Dify 0.15.x / 1.x 的 workflow 模式
+#
+# 说明：
+# 1. 节点、变量名与 docs/06-Agent节点拆解与架构时序.md 的对照表严格一致；
+# 2. 提示词内容与 prompts/*.md 保持同源，改提示词请两边同步；
+# 3. 若因 Dify 版本差异导致导入失败，按 docs/07 第 5.2 节的手工节点清单重建，
+#    30 分钟即可完成，节点顺序与下方完全一致。
+# 4. 导入后必须按顺序做三件事（缺任一步都会导致演示失败）：
+#    a) 先建知识库：把 knowledge/faq.md 上传为数据集，并把数据集 ID 填到
+#       「知识检索」节点的 dataset_ids（为空则 N4 恒为空召回）；
+#    b) 绑定模型凭据（默认 langgenius/openai/openai + gpt-4o-mini）；
+#    c) 跑一条转人工用例（如「杯子破损，我要投诉」）确认 need_human=true。
+#
+# 5. 配置双真相源说明（重要）：
+#    代码版（src/）的画像规则读 config/personas.yaml、合规规则读 config/compliance.yaml；
+#    Dify 版的同等规则内嵌在「标签人群匹配」「合规质检」「兜底替换」三个代码节点里。
+#    改规则时：走代码版改 yaml，走 Dify 改节点代码，两边都改则需人工核对一致性。
+#
+# 6. 完整节点链路（共 18 个节点、19 条边）：
+#    开始 → N1 脱敏 → N2 意图 → N3 画像 → N4 检索 → N5 生成 → N6 质检
+#         → N6 分支 →（命中）N6.5 整改#1 → N6 复查 →（仍命中）N6.5 整改#2
+#         → N6.9 本地兜底 → N7 转人工决策 ←（未命中/复查通过也汇入 N7）
+#         → N7 分支 →（转人工）N8 工单摘要 → 结束-转人工
+#                    →（自动应答）结束-自动应答
+# =============================================================================
+
+app:
+  name: 电商智能客服 Agent
+  description: 意图识别 → 标签人群匹配 → 知识检索 → 话术生成 → 合规质检 → 转人工兜底
+  mode: workflow
+  icon: 🤖
+  icon_background: '#E0F2FE'
+  use_icon_as_answer_icon: false
+
+kind: app
+version: 0.1.5
+
+dependencies: []
+
+workflow:
+  conversation_variables: []
+  environment_variables: []
+
+  features:
+    file_upload:
+      allowed_file_extensions: []
+      allowed_file_types: []
+      allowed_file_upload_methods: []
+      enabled: false
+      number_limits: 3
+    opening_statement: ''
+    retriever_resource:
+      enabled: true
+    sensitive_word_avoidance:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    suggested_questions: []
+    suggested_questions_after_answer:
+      enabled: false
+    text_to_speech:
+      enabled: false
+
+  graph:
+    nodes:
+
+      # ---------------------------------------------------------------- 开始
+      - id: start
+        type: custom
+        position:
+          x: 80
+          y: 320
+        positionAbsolute:
+          x: 80
+          y: 320
+        width: 244
+        height: 116
+        sourcePosition: right
+        targetPosition: left
+        data:
+          type: start
+          title: 开始
+          desc: 接收用户消息与用户标签
+          variables:
+            - variable: user_message
+              label: 用户消息
+              type: text-input
+              required: true
+              max_length: 512
+              options: []
+            - variable: user_tags
+              label: 用户标签(JSON)
+              type: text-input
+              required: false
+              max_length: 2048
+              options: []
+
+      # ------------------------------------------------------------ 入参脱敏
+      - id: code_redact
+        type: custom
+        position:
+          x: 400
+          y: 320
+        positionAbsolute:
+          x: 400
+          y: 320
+        width: 244
+        height: 116
+        sourcePosition: right
+        targetPosition: left
+        data:
+          type: code
+          title: 入参脱敏
+          desc: 证件号与手机号在进入任何模型前隐藏，避免隐私落盘
+          code_language: python3
+          variables:
+            - variable: user_message
+              value_selector:
+                - start
+                - user_message
+          code: |
+            import re
+
+            # 顺序不可调换：先匹配 18 位证件号，再匹配 11 位手机号
+            IDCARD_RE = re.compile(r"\d{18}")
+            PHONE_RE = re.compile(r"\d{11}")
+
+
+            def main(user_message: str) -> dict:
+                text = (user_message or "").strip()
+                clean = IDCARD_RE.sub("【证件号已隐藏】", text)
+                clean = PHONE_RE.sub("【手机号已隐藏】", clean)
+                return {
+                    "clean_message": clean,
+                    "redacted": "true" if clean != text else "false",
+                }
+          outputs:
+            clean_message:
+              type: string
+              children: null
+            redacted:
+              type: string
+              children: null
+
+      # ------------------------------------------------------------ 意图识别
+      - id: llm_intent
+        type: custom
+        position:
+          x: 720
+          y: 320
+        positionAbsolute:
+          x: 720
+          y: 320
+        width: 244
+        height: 116
+        sourcePosition: right
+        targetPosition: left
+        data:
+          type: llm
+          title: 意图识别
+          desc: 从 8 类意图中选择唯一最匹配项，只输出意图 id
+          model:
+            provider: langgenius/openai/openai
+            name: gpt-4o-mini
+            mode: chat
+            completion_params:
+              temperature: 0
+          prompt_template:
+            - role: system
+              text: |
+                你是电商客服意图分类器。请从下列意图中选择唯一最匹配的一个，
+                只输出意图 id，不要输出解释、标点或多余文字。
+
+                意图列表：
+                - product_consult：售前商品咨询（选型、参数、材质、适用场景）
+                - price_promo：价格与优惠（折扣、券、满减、到手价）
+                - order_query：订单查询（订单状态、支付、扣款）
+                - logistics：物流配送（发货、时效、单号、签收）
+                - refund_return：退换货（退货、退款、换货、无理由）
+                - quality_issue：商品质量问题（破损、漏发、错发、瑕疵、色差）
+                - invoice：发票开具（开票、抬头、税号、报销）
+                - complaint：投诉与维权（态度、欺骗、差评、举报）
+                - other：其他或闲聊（问候、转人工、无明确诉求）
+
+                判定优先级：投诉/维权 > 质量问题 > 退换货 > 物流 > 订单 > 价格 > 售前 > 其他。
+                当用户同时表达多个诉求时，取情绪最强烈、损失最直接的那一个。
+            - role: user
+              text: '{{#code_redact.clean_message#}}'
+          variables: []
+          vision:
+            enabled: false
+
+      # -------------------------------------------------------- 标签人群匹配
+      - id: code_persona
+        type: custom
+        position:
+          x: 1040
+          y: 320
+        positionAbsolute:
+          x: 1040
+          y: 320
+        width: 244
+        height: 116
+        sourcePosition: right
+        targetPosition: left
+        data:
+          type: code
+          title: 标签人群匹配
+          desc: 7 维标签规则打分，取最高分画像，无命中回落兜底人群
+          code_language: python3
+          variables:
+            - variable: intent_id
+              value_selector:
+                - llm_intent
+                - text
+            - variable: user_tags
+              value_selector:
+                - start
+                - user_tags
+          code: |
+            import json
+
+            # 与 config/personas.yaml 保持同源；实际部署建议改成从外部配置读取
+            PERSONAS = [
+                {"id": "vip_loyal_high", "name": "高价值忠诚VIP", "rules": [
+                    {"field": "value_level", "op": "equals", "value": "high", "weight": 40},
+                    {"field": "member_level", "op": "in", "value": ["V4", "V5"], "weight": 30},
+                    {"field": "lifecycle", "op": "equals", "value": "active", "weight": 20},
+                    {"field": "intent", "op": "in", "value": ["price_promo", "product_consult"], "weight": 15},
+                ], "strategy": {
+                    "tone": "尊贵、克制、先结论后补充", "address": "尊敬的会员",
+                    "focus": "第一句直接给结论；主动叠加专属权益；大额诉求升级专属客服",
+                    "perks": "会员专属券包、免运费特权、专属客服通道",
+                    "taboos": "不要使用亲/宝子等泛化称呼；不要引导比价；不要推销低价商品",
+                    "closing": "主动确认是否需要安排专属顾问继续跟进", "max_discount": 0.15,
+                }},
+                {"id": "price_sensitive_new", "name": "价格敏感新客", "rules": [
+                    {"field": "lifecycle", "op": "equals", "value": "new", "weight": 40},
+                    {"field": "price_sensitivity", "op": "equals", "value": "sensitive", "weight": 35},
+                    {"field": "source", "op": "in", "value": ["live", "search"], "weight": 20},
+                    {"field": "intent", "op": "in", "value": ["price_promo", "product_consult"], "weight": 15},
+                ], "strategy": {
+                    "tone": "热情、直白、给确定性数字", "address": "亲",
+                    "focus": "先给明确价格区间再给省钱路径；用到手价替代打折表述；强调低价不等于低质",
+                    "perks": "新人首单立减、满减券包、运费险",
+                    "taboos": "不要使用全网最低/史上最低等绝对化用语；不要承诺超权限折扣；不要贬低竞品",
+                    "closing": "给出下单入口，并提示券的有效期", "max_discount": 0.10,
+                }},
+                {"id": "anxious_urgent", "name": "焦虑催单型", "rules": [
+                    {"field": "emotion", "op": "equals", "value": "anxious", "weight": 40},
+                    {"field": "intent", "op": "in", "value": ["logistics", "order_query"], "weight": 35},
+                    {"field": "lifecycle", "op": "in", "value": ["active", "new"], "weight": 10},
+                ], "strategy": {
+                    "tone": "稳定、安抚、先共情再给确定时间", "address": "您",
+                    "focus": "第一句共情第二句给具体节点时间；主动提供单号与查询路径；异常件主动给补偿",
+                    "perks": "优先派送、运费券、延迟补偿",
+                    "taboos": "不要使用应该/大概/可能等模糊词；不要归咎物流方；不要承诺精确到小时",
+                    "closing": "给出主动跟进承诺并设置回访节点", "max_discount": 0.05,
+                }},
+                {"id": "angry_complaint", "name": "愤怒维权型", "rules": [
+                    {"field": "emotion", "op": "equals", "value": "angry", "weight": 45},
+                    {"field": "intent", "op": "in", "value": ["complaint", "quality_issue", "refund_return"], "weight": 35},
+                    {"field": "value_level", "op": "in", "value": ["high", "medium"], "weight": 10},
+                ], "strategy": {
+                    "tone": "诚恳、低姿态、不辩解、只给方案", "address": "您",
+                    "focus": "第一句直接道歉不解释；一次性给完整解决方案；明确责任人与处理时限",
+                    "perks": "全额退款、免费补发、补偿券",
+                    "taboos": "不要反问用户；不要使用按规定/公司要求等推责表述；不要承诺法定之外的赔偿倍数",
+                    "closing": "给出工单号与专属处理人，主动告知下一步时间", "max_discount": 0.20,
+                }},
+                {"id": "rational_researcher", "name": "理性比价研究型", "rules": [
+                    {"field": "price_sensitivity", "op": "in", "value": ["neutral", "insensitive"], "weight": 30},
+                    {"field": "intent", "op": "equals", "value": "product_consult", "weight": 35},
+                    {"field": "service_pref", "op": "equals", "value": "self_service", "weight": 25},
+                ], "strategy": {
+                    "tone": "客观、结构化、给参数与依据", "address": "您",
+                    "focus": "用要点列表回答；给可验证依据；不回避产品短板",
+                    "perks": "延长保修、免费试用装",
+                    "taboos": "不要使用夸张形容；不要回避缺点；不要编造参数",
+                    "closing": "给出规格对比页与售后条款链接", "max_discount": 0.05,
+                }},
+                {"id": "silent_recall", "name": "沉默流失预警", "rules": [
+                    {"field": "lifecycle", "op": "in", "value": ["silent", "churn_risk"], "weight": 45},
+                    {"field": "intent", "op": "in", "value": ["price_promo", "product_consult", "other"], "weight": 20},
+                ], "strategy": {
+                    "tone": "轻打扰、价值导向、不制造压力", "address": "您",
+                    "focus": "一条消息只给一个钩子；用专享回归权益替代清仓打折；提供低门槛回流动作",
+                    "perks": "回归专享券、老客价保",
+                    "taboos": "不要连续追问为什么不买；不要制造焦虑；不要群发式话术",
+                    "closing": "给一次性可领取权益，领取即结束对话", "max_discount": 0.12,
+                }},
+            ]
+
+            FALLBACK = {
+                "tone": "中性、简洁、礼貌", "address": "您",
+                "focus": "先回答用户明确问题，再补充一条相关信息；信息不足时反问一个关键问题",
+                "perks": "标准售后服务",
+                "taboos": "不要使用绝对化用语；不要承诺未确认的时效",
+                "closing": "询问是否还需要其他帮助", "max_discount": 0.05,
+            }
+
+            THRESHOLD = 45
+
+
+            def rule_hit(rule, fields):
+                actual = fields.get(rule["field"])
+                if actual is None:
+                    return False
+                op, expected = rule.get("op", "equals"), rule["value"]
+                if op == "equals":
+                    return str(actual) == str(expected)
+                if op == "in":
+                    return str(actual) in [str(v) for v in expected]
+                if op == "not_in":
+                    return str(actual) not in [str(v) for v in expected]
+                return False
+
+
+            def main(intent_id: str, user_tags: str) -> dict:
+                try:
+                    tags = json.loads(user_tags) if user_tags else {}
+                except (ValueError, TypeError):
+                    tags = {}
+                fields = dict(tags)
+                fields["intent"] = (intent_id or "").strip().strip('`"\'。.').lower()
+
+                best, best_score, best_hits = None, 0.0, []
+                for persona in PERSONAS:
+                    score = 0.0
+                    hits = []
+                    for rule in persona["rules"]:
+                        if rule_hit(rule, fields):
+                            score += float(rule["weight"])
+                            hits.append(f'{rule["field"]}={fields.get(rule["field"])}')
+                    if score > 0 and score > best_score:
+                        best, best_score, best_hits = persona, score, hits
+
+                if best is not None and best_score >= THRESHOLD:
+                    return {
+                        "persona_id": best["id"],
+                        "persona_name": best["name"],
+                        "persona_score": best_score,
+                        "persona_strategy": json.dumps(best["strategy"], ensure_ascii=False),
+                        "matched_rules": "；".join(best_hits),
+                    }
+
+                return {
+                    "persona_id": "general_fallback",
+                    "persona_name": "通用兜底人群",
+                    "persona_score": best_score,
+                    "persona_strategy": json.dumps(FALLBACK, ensure_ascii=False),
+                    "matched_rules": "兜底",
+                }
+          outputs:
+            persona_id:
+              type: string
+              children: null
+            persona_name:
+              type: string
+              children: null
+            persona_score:
+              type: number
+              children: null
+            persona_strategy:
+              type: string
+              children: null
+            matched_rules:
+              type: string
+              children: null
+
+      # ------------------------------------------------------------ 知识检索
+      - id: kb_retrieval
+        type: custom
+        position:
+          x: 1360
+          y: 320
+        positionAbsolute:
+          x: 1360
+          y: 320
+        width: 244
+        height: 116
+        sourcePosition: right
+        targetPosition: left
+        data:
+          type: knowledge-retrieval
+          title: 知识检索
+          desc: 按脱敏后的用户消息召回 Top3 知识片段（必须绑定 knowledge/faq.md 数据集）
+          dataset_ids: []
+          retrieval_mode: multiple
+          query_variable_selector:
+            - code_redact
+            - clean_message
+          multiple_retrieval_config:
+            top_k: 3
+            score_threshold: 0.15
+            score_threshold_enabled: true
+            reranking_enable: false
+            reranking_mode: null
+            weights: null
+
+      # ------------------------------------------------------------ 话术生成
+      - id: llm_reply
+        type: custom
+        position:
+          x: 1680
+          y: 320
+        positionAbsolute:
+          x: 1680
+          y: 320
+        width: 244
+        height: 116
+        sourcePosition: right
+        targetPosition: left
+        data:
+          type: llm
+          title: 话术生成
+          desc: 按画像语气 + 意图 + 知识片段生成回复
+          model:
+            provider: langgenius/openai/openai
+            name: gpt-4o-mini
+            mode: chat
+            completion_params:
+              temperature: 0.3
+          prompt_template:
+            - role: system
+              text: |
+                你是电商平台的一线智能客服。回复必须同时满足以下三个约束。
+
+                【约束一：人设与语气】
+                当前用户画像：{{#code_persona.persona_name#}}
+                画像策略（含语气/称呼/沟通重点/可给权益/禁区/收尾动作/优惠上限）：
+                {{#code_persona.persona_strategy#}}
+
+                【约束二：事实边界】
+                只能使用下方「知识片段」中的事实，不得编造任何时效、价格、政策、参数。
+                知识片段中没有的信息，必须回答"我核实后回复您"，并给出下一步动作。
+                优惠力度不得超过策略中的 max_discount，超出必须引导至人工客服。
+
+                【约束三：合规红线】命中任意一条即不合格
+                - 不使用绝对化用语（最好、第一、全网最低、100%、永久）；
+                - 不承诺超出平台规则的赔付（假一赔十、全额赔付）；
+                - 不贬低竞品，不索取用户隐私（身份证、银行卡、验证码）；
+                - 非医疗商品不得宣称治疗、治愈、根治等功效。
+
+                【结构要求】
+                1. 第一句给结论或共情，禁止铺垫；
+                2. 正文 2-4 句，用事实说话；
+                3. 最后一句给明确的下一步动作；
+                4. 总长度 60-180 字。
+
+                【当前意图】
+                {{#llm_intent.text#}}
+
+                【知识片段】
+                {{#kb_retrieval.result#}}
+            - role: user
+              text: |
+                【用户原话】
+                {{#code_redact.clean_message#}}
+
+                请按 System 约束生成回复。
+          variables: []
+          vision:
+            enabled: false
+
+      # ------------------------------------------------------------ 合规质检
+      - id: code_guard
+        type: custom
+        position:
+          x: 2000
+          y: 320
+        positionAbsolute:
+          x: 2000
+          y: 320
+        width: 244
+        height: 116
+        sourcePosition: right
+        targetPosition: left
+        data:
+          type: code
+          title: 合规质检
+          desc: block 级规则命中则判定不可下发
+          code_language: python3
+          variables:
+            - variable: reply
+              value_selector:
+                - llm_reply
+                - text
+          code: |
+            import re
+
+            # 与 config/compliance.yaml 同源，只保留 block 级规则
+            BLOCK_RULES = [
+                {"id": "absolute_wording", "name": "绝对化用语",
+                 "patterns": ["最好", "最强", "第一品牌", "全网最低", "史上最低", "100%", "绝对", "永久", "唯一", "顶级", "国家级"]},
+                {"id": "over_promise_compensation", "name": "超额赔付承诺",
+                 "patterns": ["假一赔十", "十倍赔偿", "无条件赔偿", "全额赔付", "包赔", "赔十倍"]},
+                {"id": "competitor_defamation", "name": "贬低竞品",
+                 "patterns": ["别家都是假货", "其他家都是假的", "同行都坑人", "那家是骗子"]},
+                {"id": "privacy_risk", "name": "隐私与账号风险",
+                 "patterns": ["身份证号", "银行卡号", "密码", "验证码发我"]},
+                {"id": "medical_claim", "name": "功效违规宣称",
+                 "patterns": ["治疗", "治愈", "根治", "药效", "疗效"]},
+            ]
+
+
+            def main(reply: str) -> dict:
+                text = reply or ""
+                issues = []
+                for rule in BLOCK_RULES:
+                    for pattern in rule["patterns"]:
+                        if re.search(pattern, text):
+                            issues.append(f'{rule["name"]}({rule["id"]})：命中「{pattern}」')
+                            break
+                return {
+                    "has_block": "true" if issues else "false",
+                    "issues": "；".join(issues) if issues else "无",
+                    "block_count": len(issues),
+                }
+          outputs:
+            has_block:
+              type: string
+              children: null
+            issues:
+              type: string
+              children: null
+            block_count:
+              type: number
+              children: null
+
+      # ------------------------------------------------------------ 合规分支
+      - id: if_compliance
+        type: custom
+        position:
+          x: 2320
+          y: 320
+        positionAbsolute:
+          x: 2320
+          y: 320
+        width: 244
+        height: 116
+        sourcePosition: right
+        targetPosition: left
+        data:
+          type: if-else
+          title: 合规分支
+          desc: 命中 block 则走整改，否则直接结束
+          cases:
+            - case_id: 'true'
+              id: 'true'
+              logical_operator: and
+              conditions:
+                - id: cond_block
+                  comparison_operator: contains
+                  value: 'true'
+                  varType: string
+                  variable_selector:
+                    - code_guard
+                    - has_block
+
+      # ------------------------------------------------------------ 合规整改
+      - id: llm_fix
+        type: custom
+        position:
+          x: 2320
+          y: 540
+        positionAbsolute:
+          x: 2320
+          y: 540
+        width: 244
+        height: 116
+        sourcePosition: right
+        targetPosition: left
+        data:
+          type: llm
+          title: 合规整改
+          desc: 最小必要改写，只删除违规表述，不新增事实
+          model:
+            provider: langgenius/openai/openai
+            name: gpt-4o-mini
+            mode: chat
+            completion_params:
+              temperature: 0.2
+          prompt_template:
+            - role: system
+              text: |
+                你是电商平台的合规审核员。下面这段客服回复命中了合规风险，请只做最小必要改写后返回。
+
+                改写要求：
+                1. 删除或替换所有绝对化用语，改为可验证的相对表述；
+                2. 删除超出平台规则的赔付承诺，改为"按平台售后规则处理"；
+                3. 删除任何贬低竞品、索取隐私、宣称医疗功效的表述；
+                4. 保留原文的事实信息、语气人设与下一步动作，不要新增任何未在原文出现的事实；
+                5. 不得超出优惠授权上限。
+
+                本次命中的问题：
+                {{#code_guard.issues#}}
+
+                只输出改写后的回复正文，不要输出解释、对比说明或 JSON。
+            - role: user
+              text: '{{#llm_reply.text#}}'
+          variables: []
+          vision:
+            enabled: false
+
+      # -------------------------------------------------------- 合规复查（整改#1 后）
+      - id: code_guard_r2
+        type: custom
+        position:
+          x: 2640
+          y: 540
+        positionAbsolute:
+          x: 2640
+          y: 540
+        width: 244
+        height: 116
+        sourcePosition: right
+        targetPosition: left
+        data:
+          type: code
+          title: 合规复查
+          desc: 对整改#1 的产物重新质检，判断是否需要第二轮整改
+          code_language: python3
+          variables:
+            - variable: reply
+              value_selector:
+                - llm_fix
+                - text
+          code: |
+            import re
+
+            # 与 config/compliance.yaml 同源，与「合规质检」节点保持完全一致
+            BLOCK_RULES = [
+                {"id": "absolute_wording", "name": "绝对化用语",
+                 "patterns": ["最好", "最强", "第一品牌", "全网最低", "史上最低", "100%", "绝对", "永久", "唯一", "顶级", "国家级"]},
+                {"id": "over_promise_compensation", "name": "超额赔付承诺",
+                 "patterns": ["假一赔十", "十倍赔偿", "无条件赔偿", "全额赔付", "包赔", "赔十倍"]},
+                {"id": "competitor_defamation", "name": "贬低竞品",
+                 "patterns": ["别家都是假货", "其他家都是假的", "同行都坑人", "那家是骗子"]},
+                {"id": "privacy_risk", "name": "隐私与账号风险",
+                 "patterns": ["身份证号", "银行卡号", "密码", "验证码发我"]},
+                {"id": "medical_claim", "name": "功效违规宣称",
+                 "patterns": ["治疗", "治愈", "根治", "药效", "疗效"]},
+            ]
+
+
+            def main(reply: str) -> dict:
+                text = reply or ""
+                issues = []
+                for rule in BLOCK_RULES:
+                    for pattern in rule["patterns"]:
+                        if re.search(pattern, text):
+                            issues.append(f'{rule["name"]}({rule["id"]})：命中「{pattern}」')
+                            break
+                return {
+                    "has_block": "true" if issues else "false",
+                    "issues": "；".join(issues) if issues else "无",
+                    "block_count": len(issues),
+                }
+          outputs:
+            has_block:
+              type: string
+              children: null
+            issues:
+              type: string
+              children: null
+            block_count:
+              type: number
+              children: null
+
+      # -------------------------------------------------------- 合规分支（第二轮）
+      - id: if_compliance_r2
+        type: custom
+        position:
+          x: 2960
+          y: 540
+        positionAbsolute:
+          x: 2960
+          y: 540
+        width: 244
+        height: 116
+        sourcePosition: right
+        targetPosition: left
+        data:
+          type: if-else
+          title: 合规分支-复查
+          desc: 复查仍命中 block 则进入第二轮整改，否则进入转人工决策
+          cases:
+            - case_id: 'true'
+              id: 'true'
+              logical_operator: and
+              conditions:
+                - id: cond_block_r2
+                  comparison_operator: contains
+                  value: 'true'
+                  varType: string
+                  variable_selector:
+                    - code_guard_r2
+                    - has_block
+
+      # -------------------------------------------------------- 合规整改（第二轮）
+      - id: llm_fix_r2
+        type: custom
+        position:
+          x: 2960
+          y: 760
+        positionAbsolute:
+          x: 2960
+          y: 760
+        width: 244
+        height: 116
+        sourcePosition: right
+        targetPosition: left
+        data:
+          type: llm
+          title: 合规整改-第二轮
+          desc: 最后一轮模型整改，失败则交本地兜底
+          model:
+            provider: langgenius/openai/openai
+            name: gpt-4o-mini
+            mode: chat
+            completion_params:
+              temperature: 0.2
+          prompt_template:
+            - role: system
+              text: |
+                你是电商平台的合规审核员。上一轮整改后仍存在违规表述，请再做一次最小必要改写。
+
+                改写要求：
+                1. 删除所有绝对化用语，改为可验证的相对表述；
+                2. 删除超出平台规则的赔付承诺，改为"按平台售后规则处理"；
+                3. 删除贬低竞品、索取隐私、宣称医疗功效的表述；
+                4. 保留事实信息与下一步动作，不得新增未出现的事实；
+                5. 若某句话无法在不违规的前提下保留，直接删除整句。
+
+                仍未消除的问题：
+                {{#code_guard_r2.issues#}}
+
+                只输出改写后的回复正文。
+            - role: user
+              text: '{{#llm_fix.text#}}'
+          variables: []
+          vision:
+            enabled: false
+
+      # -------------------------------------------------------- 本地兜底替换
+      - id: code_sanitize
+        type: custom
+        position:
+          x: 3280
+          y: 760
+        positionAbsolute:
+          x: 3280
+          y: 760
+        width: 244
+        height: 116
+        sourcePosition: right
+        targetPosition: left
+        data:
+          type: code
+          title: 本地兜底替换
+          desc: 模型整改两轮仍失败时的确定性替换，保证有文案可下发
+          code_language: python3
+          variables:
+            - variable: reply
+              value_selector:
+                - llm_fix_r2
+                - text
+          code: |
+            import re
+
+            REPLACEMENTS = {
+                "全网最低": "同价位较优",
+                "史上最低": "同价位较优",
+                "第一品牌": "知名品牌",
+                "假一赔十": "按平台售后规则处理",
+                "十倍赔偿": "按平台售后规则处理",
+                "无条件赔偿": "按平台售后规则处理",
+                "全额赔付": "按平台售后规则处理",
+                "包赔": "按平台售后规则处理",
+                "赔十倍": "按平台售后规则处理",
+                "最好": "比较合适",
+                "最强": "较强",
+                "顶级": "较高",
+                "国家级": "行业级",
+                "绝对": "基本",
+                "永久": "长期",
+                "唯一": "少有的",
+                "100%": "高概率",
+                "别家都是假货": "不同渠道各有差异",
+                "其他家都是假的": "不同渠道各有差异",
+                "同行都坑人": "不同渠道各有差异",
+                "那家是骗子": "不同渠道各有差异",
+                "请把验证码发我": "请注意保护验证码",
+                "验证码发我": "注意保护验证码",
+            }
+
+            # 无法替换的隐私/医疗表述，直接删除所在短句
+            DROP_PATTERNS = ["身份证号", "银行卡号", "密码", "治疗", "治愈", "根治", "药效", "疗效"]
+
+            SAFE_REPLY = "这个问题需要人工客服为您进一步核实，请稍等，我们会尽快与您联系。"
+
+            # 兜底后再跑一次与「合规质检」同源的 block 规则，确保下发文案干净
+            BLOCK_PATTERNS = [
+                "最好", "最强", "第一品牌", "全网最低", "史上最低", "100%", "绝对",
+                "永久", "唯一", "顶级", "国家级",
+                "假一赔十", "十倍赔偿", "无条件赔偿", "全额赔付", "包赔", "赔十倍",
+                "别家都是假货", "其他家都是假的", "同行都坑人", "那家是骗子",
+                "身份证号", "银行卡号", "密码", "验证码发我",
+                "治疗", "治愈", "根治", "药效", "疗效",
+            ]
+
+
+            def main(reply: str) -> dict:
+                text = reply or ""
+                for bad, good in REPLACEMENTS.items():
+                    text = text.replace(bad, good)
+                if any(p in text for p in DROP_PATTERNS):
+                    parts = re.split(r"[，。；！？]", text)
+                    kept = [s for s in parts if s and not any(p in s for p in DROP_PATTERNS)]
+                    text = "，".join(kept) + "。"
+                # 全部句子都被删除时给安全兜底文案，绝不返回空字符串
+                if not text.strip("，。；！？ \n"):
+                    text = SAFE_REPLY
+                remaining = [p for p in BLOCK_PATTERNS if p in text]
+                return {
+                    "text": text,
+                    "block_count": len(remaining),
+                    "sanitized": "true",
+                }
+          outputs:
+            text:
+              type: string
+              children: null
+            block_count:
+              type: number
+              children: null
+            sanitized:
+              type: string
+              children: null
+
+      # -------------------------------------------------------- 转人工决策
+      - id: code_handoff
+        type: custom
+        position:
+          x: 3600
+          y: 540
+        positionAbsolute:
+          x: 3600
+          y: 540
+        width: 244
+        height: 116
+        sourcePosition: right
+        targetPosition: left
+        data:
+          type: code
+          title: 转人工决策
+          desc: 汇总合规各分支的回复定稿，并按置信度/高危意图/情绪判定是否转人工
+          code_language: python3
+          variables:
+            - variable: intent_raw
+              value_selector:
+                - llm_intent
+                - text
+            - variable: persona_id
+              value_selector:
+                - code_persona
+                - persona_id
+            - variable: knowledge
+              value_selector:
+                - kb_retrieval
+                - result
+            - variable: block_count_1
+              value_selector:
+                - code_guard
+                - block_count
+            - variable: block_count_2
+              value_selector:
+                - code_guard_r2
+                - block_count
+            - variable: block_count_3
+              value_selector:
+                - code_sanitize
+                - block_count
+            - variable: reply_original
+              value_selector:
+                - llm_reply
+                - text
+            - variable: reply_fix1
+              value_selector:
+                - llm_fix
+                - text
+            - variable: reply_fix2
+              value_selector:
+                - llm_fix_r2
+                - text
+            - variable: reply_sanitized
+              value_selector:
+                - code_sanitize
+                - text
+          code: |
+            KNOWN_INTENTS = [
+                "product_consult", "price_promo", "order_query", "logistics",
+                "refund_return", "quality_issue", "invoice", "complaint", "other",
+            ]
+            HANDOFF_INTENTS = ["complaint", "quality_issue"]
+            MIN_CONFIDENCE = 0.45
+            HANDOFF_REPLY = (
+                "非常抱歉，这个问题需要由人工客服为您处理。已为您生成工单，"
+                "专属客服将在 30 分钟内与您联系，您也可以直接点击下方「转人工」按钮。"
+            )
+
+
+            def _num(value):
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    return None
+
+
+            def _has_knowledge(chunks):
+                if chunks is None:
+                    return False
+                if isinstance(chunks, (list, tuple, dict, set)):
+                    return len(chunks) > 0
+                return bool(str(chunks).strip())
+
+
+            def main(intent_raw, persona_id, knowledge, block_count_1, block_count_2,
+                     block_count_3, reply_original, reply_fix1, reply_fix2,
+                     reply_sanitized) -> dict:
+                intent_id = (intent_raw or "").strip().strip('`"\'。. ').lower()
+                confidence = 0.85 if intent_id in KNOWN_INTENTS else 0.30
+
+                # 取最后一次执行过的质检结果；未执行的分支变量为 None
+                latest_block = 0
+                for value in (block_count_3, block_count_2, block_count_1):
+                    parsed = _num(value)
+                    if parsed is not None:
+                        latest_block = parsed
+                        break
+
+                reason = None
+                if latest_block > 0:
+                    reason = "compliance_unresolved"
+                elif confidence < MIN_CONFIDENCE:
+                    reason = "low_intent_confidence"
+                elif intent_id in HANDOFF_INTENTS and not _has_knowledge(knowledge):
+                    reason = "high_risk_intent_without_knowledge"
+                elif (persona_id or "") == "angry_complaint":
+                    reason = "angry_user_escalation"
+
+                # 回复定稿优先级：本地兜底 > 整改#2 > 整改#1 > 原始
+                final_reply = reply_original or ""
+                for candidate in (reply_fix1, reply_fix2, reply_sanitized):
+                    if candidate:
+                        final_reply = candidate
+                if reason is not None:
+                    final_reply = HANDOFF_REPLY
+
+                return {
+                    "final_reply": final_reply,
+                    "need_human": "true" if reason else "false",
+                    "handoff_reason": reason or "none",
+                    "intent_id": intent_id,
+                    "intent_confidence": confidence,
+                }
+          outputs:
+            final_reply:
+              type: string
+              children: null
+            need_human:
+              type: string
+              children: null
+            handoff_reason:
+              type: string
+              children: null
+            intent_id:
+              type: string
+              children: null
+            intent_confidence:
+              type: number
+              children: null
+
+      # -------------------------------------------------------- 转人工分支
+      - id: if_handoff
+        type: custom
+        position:
+          x: 3920
+          y: 540
+        positionAbsolute:
+          x: 3920
+          y: 540
+        width: 244
+        height: 116
+        sourcePosition: right
+        targetPosition: left
+        data:
+          type: if-else
+          title: 转人工分支
+          desc: need_human 为 true 走工单与人工，否则直接下发
+          cases:
+            - case_id: 'true'
+              id: 'true'
+              logical_operator: and
+              conditions:
+                - id: cond_handoff
+                  comparison_operator: contains
+                  value: 'true'
+                  varType: string
+                  variable_selector:
+                    - code_handoff
+                    - need_human
+
+      # -------------------------------------------------------- 工单摘要
+      - id: code_ticket
+        type: custom
+        position:
+          x: 3920
+          y: 760
+        positionAbsolute:
+          x: 3920
+          y: 760
+        width: 244
+        height: 116
+        sourcePosition: right
+        targetPosition: left
+        data:
+          type: code
+          title: 工单摘要
+          desc: 为人工坐席生成一屏可读的工单摘要（画像/意图/原因/诉求/建议动作）
+          code_language: python3
+          variables:
+            - variable: need_human
+              value_selector:
+                - code_handoff
+                - need_human
+            - variable: handoff_reason
+              value_selector:
+                - code_handoff
+                - handoff_reason
+            - variable: intent_id
+              value_selector:
+                - code_handoff
+                - intent_id
+            - variable: intent_confidence
+              value_selector:
+                - code_handoff
+                - intent_confidence
+            - variable: persona_name
+              value_selector:
+                - code_persona
+                - persona_name
+            - variable: persona_score
+              value_selector:
+                - code_persona
+                - persona_score
+            - variable: persona_strategy
+              value_selector:
+                - code_persona
+                - persona_strategy
+            - variable: user_tags
+              value_selector:
+                - start
+                - user_tags
+            - variable: clean_message
+              value_selector:
+                - code_redact
+                - clean_message
+          code: |
+            import json
+
+
+            def main(need_human, handoff_reason, intent_id, intent_confidence,
+                     persona_name, persona_score, persona_strategy, user_tags,
+                     clean_message) -> dict:
+                if str(need_human).lower() != "true":
+                    return {"ticket_summary": ""}
+                try:
+                    tags = json.loads(user_tags) if user_tags else {}
+                except (TypeError, ValueError):
+                    tags = {}
+                try:
+                    strategy = json.loads(persona_strategy) if persona_strategy else {}
+                except (TypeError, ValueError):
+                    strategy = {}
+                user_id = tags.get("user_id") or "匿名用户"
+                closing = strategy.get("closing") or "请人工客服介入处理"
+                return {
+                    "ticket_summary": (
+                        f"用户{user_id}｜画像：{persona_name}({persona_score}分)"
+                        f"｜意图：{intent_id}({intent_confidence})"
+                        f"｜转人工原因：{handoff_reason}"
+                        f"｜诉求原文：{(clean_message or '')[:60]}"
+                        f"｜建议动作：{closing}"
+                    )
+                }
+          outputs:
+            ticket_summary:
+              type: string
+              children: null
+
+      # ------------------------------------------------------------ 结束（正常）
+      - id: end_normal
+        type: custom
+        position:
+          x: 4240
+          y: 380
+        positionAbsolute:
+          x: 4240
+          y: 380
+        width: 244
+        height: 116
+        sourcePosition: right
+        targetPosition: left
+        data:
+          type: end
+          title: 结束-自动应答
+          desc: 合规通过且无需转人工，下发定稿回复
+          outputs:
+            - variable: reply
+              value_selector:
+                - code_handoff
+                - final_reply
+            - variable: intent_id
+              value_selector:
+                - code_handoff
+                - intent_id
+            - variable: intent_confidence
+              value_selector:
+                - code_handoff
+                - intent_confidence
+            - variable: persona_id
+              value_selector:
+                - code_persona
+                - persona_id
+            - variable: persona_name
+              value_selector:
+                - code_persona
+                - persona_name
+            - variable: persona_score
+              value_selector:
+                - code_persona
+                - persona_score
+            - variable: need_human
+              value_selector:
+                - code_handoff
+                - need_human
+            - variable: handoff_reason
+              value_selector:
+                - code_handoff
+                - handoff_reason
+            - variable: ticket_summary
+              value_selector: []
+
+      # ------------------------------------------------------------ 结束（转人工）
+      - id: end_handoff
+        type: custom
+        position:
+          x: 4240
+          y: 760
+        positionAbsolute:
+          x: 4240
+          y: 760
+        width: 244
+        height: 116
+        sourcePosition: right
+        targetPosition: left
+        data:
+          type: end
+          title: 结束-转人工
+          desc: 下发转人工话术 + 工单摘要，前端据此弹出人工入口
+          outputs:
+            - variable: reply
+              value_selector:
+                - code_handoff
+                - final_reply
+            - variable: intent_id
+              value_selector:
+                - code_handoff
+                - intent_id
+            - variable: intent_confidence
+              value_selector:
+                - code_handoff
+                - intent_confidence
+            - variable: persona_id
+              value_selector:
+                - code_persona
+                - persona_id
+            - variable: persona_name
+              value_selector:
+                - code_persona
+                - persona_name
+            - variable: persona_score
+              value_selector:
+                - code_persona
+                - persona_score
+            - variable: need_human
+              value_selector:
+                - code_handoff
+                - need_human
+            - variable: handoff_reason
+              value_selector:
+                - code_handoff
+                - handoff_reason
+            - variable: ticket_summary
+              value_selector:
+                - code_ticket
+                - ticket_summary
+
+    edges:
+      - id: e_start_redact
+        source: start
+        sourceHandle: source
+        target: code_redact
+        targetHandle: target
+        data:
+          sourceType: start
+          targetType: code
+          isInIteration: false
+
+      - id: e_redact_intent
+        source: code_redact
+        sourceHandle: source
+        target: llm_intent
+        targetHandle: target
+        data:
+          sourceType: code
+          targetType: llm
+          isInIteration: false
+
+      - id: e_intent_persona
+        source: llm_intent
+        sourceHandle: source
+        target: code_persona
+        targetHandle: target
+        data:
+          sourceType: llm
+          targetType: code
+          isInIteration: false
+
+      - id: e_persona_kb
+        source: code_persona
+        sourceHandle: source
+        target: kb_retrieval
+        targetHandle: target
+        data:
+          sourceType: code
+          targetType: knowledge-retrieval
+          isInIteration: false
+
+      - id: e_kb_reply
+        source: kb_retrieval
+        sourceHandle: source
+        target: llm_reply
+        targetHandle: target
+        data:
+          sourceType: knowledge-retrieval
+          targetType: llm
+          isInIteration: false
+
+      - id: e_reply_guard
+        source: llm_reply
+        sourceHandle: source
+        target: code_guard
+        targetHandle: target
+        data:
+          sourceType: llm
+          targetType: code
+          isInIteration: false
+
+      - id: e_guard_if
+        source: code_guard
+        sourceHandle: source
+        target: if_compliance
+        targetHandle: target
+        data:
+          sourceType: code
+          targetType: if-else
+          isInIteration: false
+
+      - id: e_if_true_fix
+        source: if_compliance
+        sourceHandle: 'true'
+        target: llm_fix
+        targetHandle: target
+        data:
+          sourceType: if-else
+          targetType: llm
+          isInIteration: false
+
+      - id: e_if_false_handoff
+        source: if_compliance
+        sourceHandle: 'false'
+        target: code_handoff
+        targetHandle: target
+        data:
+          sourceType: if-else
+          targetType: code
+          isInIteration: false
+
+      - id: e_fix_guard_r2
+        source: llm_fix
+        sourceHandle: source
+        target: code_guard_r2
+        targetHandle: target
+        data:
+          sourceType: llm
+          targetType: code
+          isInIteration: false
+
+      - id: e_guard_r2_if
+        source: code_guard_r2
+        sourceHandle: source
+        target: if_compliance_r2
+        targetHandle: target
+        data:
+          sourceType: code
+          targetType: if-else
+          isInIteration: false
+
+      - id: e_if_r2_true_fix
+        source: if_compliance_r2
+        sourceHandle: 'true'
+        target: llm_fix_r2
+        targetHandle: target
+        data:
+          sourceType: if-else
+          targetType: llm
+          isInIteration: false
+
+      - id: e_if_r2_false_handoff
+        source: if_compliance_r2
+        sourceHandle: 'false'
+        target: code_handoff
+        targetHandle: target
+        data:
+          sourceType: if-else
+          targetType: code
+          isInIteration: false
+
+      - id: e_fix_r2_sanitize
+        source: llm_fix_r2
+        sourceHandle: source
+        target: code_sanitize
+        targetHandle: target
+        data:
+          sourceType: llm
+          targetType: code
+          isInIteration: false
+
+      - id: e_sanitize_handoff
+        source: code_sanitize
+        sourceHandle: source
+        target: code_handoff
+        targetHandle: target
+        data:
+          sourceType: code
+          targetType: code
+          isInIteration: false
+
+      - id: e_handoff_if
+        source: code_handoff
+        sourceHandle: source
+        target: if_handoff
+        targetHandle: target
+        data:
+          sourceType: code
+          targetType: if-else
+          isInIteration: false
+
+      - id: e_if_true_ticket
+        source: if_handoff
+        sourceHandle: 'true'
+        target: code_ticket
+        targetHandle: target
+        data:
+          sourceType: if-else
+          targetType: code
+          isInIteration: false
+
+      - id: e_ticket_end_handoff
+        source: code_ticket
+        sourceHandle: source
+        target: end_handoff
+        targetHandle: target
+        data:
+          sourceType: code
+          targetType: end
+          isInIteration: false
+
+      - id: e_if_false_end
+        source: if_handoff
+        sourceHandle: 'false'
+        target: end_normal
+        targetHandle: target
+        data:
+          sourceType: if-else
+          targetType: end
+          isInIteration: false
